@@ -1,0 +1,343 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ * A module to perform custom migration from one version of Drupal to another.
+ */
+
+/**
+ * Implementation of hook_menu().
+ */
+function custom_import_menu() {
+  $items = array();
+
+  $items['admin/content/custom-import'] = array(
+    'title' => 'Custom import',
+    'description' => 'Run custom import routines to migrate from one Drupal version to another.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('custom_import_form'),
+    'access arguments' => array('administer site configuration'),
+  );
+
+  return $items;
+}
+
+function custom_import_form() {
+  drupal_set_message('Are you sure you want to run the custom import script?  No going back without re-installing the database!!!', 'warning');
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Start import'),
+  );
+
+  return $form;
+}
+
+function custom_import_form_submit($form, &$form_state) {
+  $batch = array(
+    'title' => t('Importing data'),
+    'operations' => array(),
+    'finished' => 'custom_import_batch_finished',
+  );
+
+    // Add Taxonomies - One button option. Not a lot of taxonomies to deal with
+    // select * from smf_boards;
+    // 
+    // Foreach taxonomy, grab all its posts
+    // select * from smf_messages where id_topic=53
+    // id_first_msg = node
+    // rest = comments
+    //
+  $batch['operations'][] = array('custom_import_batch_users', array());
+  $batch['operations'][] = array('custom_import_batch_forum_posts', array());
+
+  //$batch['operations'][] = array('custom_import_batch_files', array());
+  //$batch['operations'][] = array('custom_import_batch_nodes', array());
+  //$batch['operations'][] = array('custom_import_batch_comments', array());
+
+  batch_set($batch);
+}
+
+function custom_import_batch_finished($success, $results, $operations) {
+  if ($success) {
+    $message = t('Import finished successfully.');
+  }
+  else {
+    $message = t('Finished with an error.');
+  }
+  drupal_set_message($message);
+}
+
+
+function custom_import_forum_name($name)
+{
+    if (empty($_SESSION['forum_map']))
+    {
+        $_SESSION['forum_map'] = array();
+        foreach (forum_forum_load(0)->forums as $forum)
+        {
+            $_SESSION['forum_map'][$forum->name] = $forum;
+        }
+    }
+    if ($name == 'Cos &amp; Effect 2011') $name = 'Cos & Effect 2011';
+    return $_SESSION['forum_map'][$name];
+}
+
+function custom_import_name_to_uid($name)
+{
+    if (empty($_SESSION['user_map']))
+    {
+        $query = db_select('users', 'u');
+        $query->fields('u');
+        $_SESSION['user_map'] = array();
+        foreach ($query->execute() as $user)
+        {
+            $_SESSION['user_map'][$user->name] = $user;
+        }
+    }
+    return $_SESSION['user_map'][$name]->uid;
+}
+
+function custom_import_clean_body($body)
+{
+    $body = decode_entities($body);
+    $body = str_replace(array('<br/>','<br />','<br>'), "\n", $body);
+    return $body;
+}
+
+function custom_import_batch_users(&$context) {
+  db_set_active('smf'); // Switch databases.
+
+
+  // Build the total import count.
+  if (empty($context['sandbox'])) {
+    $query = db_select('members');
+    $query->addExpression('COUNT(id_member)', 'count');
+    $max = $query->execute()->fetchField()-1;
+
+    $context['sandbox'] = array(
+      'progress' => 0,
+      'current_user' => 0,
+      'max' => $max,
+    );
+  }
+
+  $groupMap = array(
+      'PC' => 6,
+      'GM' => 4,
+      'NPC' => 5,
+  );
+
+  $limit = 40; // Number of files to process at a time.
+  $query = db_select('members', 'm');
+  $query->leftJoin('membergroups', 'main_group', 'm.id_group=main_group.id_group');
+  $query->leftJoin('membergroups', 'post_group', 'm.id_post_group=post_group.id_group');
+  $query->leftJoin('themes', 'cust_facebo', 'm.id_member=cust_facebo.id_member AND cust_facebo.variable=\'cust_facebo\'');
+  $query->leftJoin('themes', 'cust_twitte', 'm.id_member=cust_twitte.id_member AND cust_twitte.variable=\'cust_twitte\'');
+  $query->fields('m');
+  $query->addField('main_group','group_name','main_group');
+  $query->addField('post_group','group_name','post_group');
+  $query->addField('cust_twitte','value','twitter');
+  $query->addField('cust_facebo','value','facebook');
+  //$query->fields('n', array('created'));
+  $query->range($context['sandbox']['current_user'], $limit);
+  $query->orderBy('m.id_member', 'asc');
+  $result = $query->execute();
+
+  db_set_active('default');
+  foreach ($result as $row) {
+      $account = user_load_by_name($row->member_name);
+      $edit = array(
+          'name' => $row->member_name,
+          'pass' => $row->passwd,
+          'mail' => $row->email_address,
+          'signature' => $row->signature,
+          'signature_format'=>'user_signature',
+          'created' => $row->date_registered,
+          'access' => $row->last_login,
+          'status' => $row->is_activated,
+          'timezone' => 'America/Vancouver',
+          'language' => '',
+          'init' => $row->email_address,
+          'field_usertitle' => array('und'=>array(array('value'=>$row->usertitle))),
+          'field_twitter' => array('und'=>array(array('value'=>$row->twitter))),
+          'field_facebook' => array('und'=>array(array('value'=>$row->facebook))),
+          'field_msn' => array('und'=>array(array('value'=>$row->msn))),
+          'field_aim' => array('und'=>array(array('value'=>$row->aim))),
+      );
+      if (!$account || !$account->uid)
+      {
+          $edit['data'] = serialize(array('contact'=>1));
+          $edit['roles'] = array();
+          $groupID = @$groupMap[ $row->main_group ];
+          if ($groupID) $edit['roles'][] = $groupID;
+          $groupID = @$groupMap[ $row->post_group ];
+          if ($groupID) $edit['roles'][] = $groupID;
+      }
+
+      /*
+      if ($row->website_title && $row->website_url)
+      {
+          $edit['field_website'] = array('und'=>array());
+          $edit['field_website']['und'][0]['title'] = $row->website_title;
+          $edit['field_website']['und'][0]['value'] = $row->website_url;
+      }
+      */
+
+      $edit['signature'] = str_replace(array(
+          '<br /><br />Uploaded with [URL=http://imageshack.us]ImageShack.us[/URL]',
+          '<br />Uploaded with [URL=http://imageshack.us]ImageShack.us[/URL]',
+          'Uploaded with [URL=http://imageshack.us]ImageShack.us[/URL]',
+      ), '', $edit['signature']);
+      $edit['signature'] = truncate_utf8($edit['signature'], 255);
+      $account = user_save($account,$edit);
+
+      if ($row->avatar)
+      {
+          $file = (object) array(
+              'uid' => $account->uid,
+              'filename' => basename($row->avatar),
+              'uri' => $row->avatar,
+              'status' => 1,
+              'timestamp' => localtime(),
+          );
+          $edit = array('picture' => $file);
+          drupal_write_record('file_managed', $file);
+          $account = user_save($account,$edit);
+      }
+      
+      $context['message'] = t('Importing user @name', array('@name' => $row->member_name));
+      $context['sandbox']['current_user']++;
+      $context['sandbox']['progress']++;
+  }
+
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+  db_set_active('default'); // Switch databases.
+}
+
+function custom_import_batch_forum_posts(&$context) {
+  db_set_active('smf'); // Switch databases.
+  #$forum = custom_import_forum_name('IRL Events');
+
+  // Build the total import count.
+  if (empty($context['sandbox'])) {
+    $query = db_select('topics');
+    $query->addExpression('COUNT(1)', 'id_msg');
+    $max = $query->execute()->fetchField();
+
+    $context['sandbox'] = array(
+      'progress' => 0,
+      'current_node' => 0,
+      'max' => $max,
+    );
+  }
+
+  $limit = 1; // Number of nodes to process at a time.
+  $query = db_select('topics', 't');
+  $query->innerJoin('messages', 'm', 't.id_first_msg = m.id_msg');
+  $query->innerJoin('members', 'me', 'm.id_member = me.id_member');
+  $query->innerJoin('boards', 'b', 'm.id_board = b.id_board');
+  $query->fields('t');
+  $query->fields('m');
+  $query->fields('me');
+  $query->addField('b','name','board_name');
+  $query->range($context['sandbox']['current_node'], $limit);
+  $query->orderBy('t.id_topic', 'asc');
+  $result = $query->execute();
+
+  foreach ($result as $row) {
+    db_set_active('default');
+    $forum = custom_import_forum_name($row->board_name);
+    if (!$forum) die("No board for " . $row->board_name);
+
+## poll
+
+    $node = (object) array(
+      'nid' => 0,
+      'type' => 'forum',
+      'uid' => custom_import_name_to_uid($row->poster_name),
+      'status' => $row->approved,
+      'language' => LANGUAGE_NONE,
+      'created' => $row->poster_time,
+      'revision_timestamp' => $row->poster_time,
+      'timestamp' => $row->poster_time,
+      #'changed' => $row->modified_time,
+      'comment' => $row->locked ? 0 : 2,
+### This is int, needs to be string i think
+      'date' => $row->poster_time,
+      'taxonomy_forums' => array(LANGUAGE_NONE => array(array('tid' => $forum->tid))),
+      'promote' => 0,
+      'title' => custom_import_clean_body($row->subject),
+      'sticky' => $row->is_sticky,
+### FIXME - get right formatter - use smileys_enabled ?
+      'body' => array(LANGUAGE_NONE => array(array('value' => custom_import_clean_body($row->body), 'summary' => custom_import_clean_body($row->body), 'format' => 'filtered_html'))),
+      'teaser' => custom_import_clean_body($row->body),
+      'log' => '',
+      'validated' => true,
+    );
+
+    db_set_active('smf'); // Switch databases.
+
+    $query = db_select('calendar', 'c');
+    $query->fields('c');
+    $query->condition('c.id_topic', $row->id_topic);
+    $event_results = $query->execute();
+    foreach ($event_results as $event) {
+        $node->field_date[LANGUAGE_NONE][] = array('value' => $event->start_date, 'value2' => $event->end_date, 'timezone' => "America/Vancouver", 'offset'=>-25200, 'offset2'=>-25200);
+    }
+    
+    db_set_active('default');
+    //drupal_write_record('node', $node);
+    //drupal_write_record('node_revision', $node);
+    node_save($node);
+    
+    db_set_active('smf');
+    $query = db_select('messages', 'm');
+    $query->innerJoin('members', 'me', 'm.id_member = me.id_member');
+    $query->fields('m');
+    $query->fields('me', array('member_name'));
+
+    $query->condition('m.id_msg', $row->id_first_msg, '!=');
+    $query->condition('m.id_topic', $row->id_topic);
+    $query->orderBy('m.id_msg', 'asc');
+    $comment_rows = $query->execute();
+
+    db_set_active('default'); // Switch back.
+    foreach ($comment_rows as $comment_row) {
+        $comment = (object) array(
+            'cid' => 0,
+            'nid' => $node->nid,
+            'pid' => 0,
+            'uid' => custom_import_name_to_uid($comment_row->member_name),
+            'language' => LANGUAGE_NONE,
+            'subject' => truncate_utf8(custom_import_clean_body($comment_row->subject), 64, TRUE),
+            'hostname' => $comment_row->poster_ip,
+            'created' => $comment_row->poster_time,
+            'timestamp' => $comment_row->poster_time,
+            #'changed' => $comment_row->modified_time,
+            'status' => $comment_row->approved,
+            #'thread',
+            'name' => $comment_row->poster_name,
+            'mail' => $comment_row->poster_email,
+            'homepage' => '',
+        );
+        $comment->comment_body[LANGUAGE_NONE][0] = array('value' => custom_import_clean_body($comment_row->body), 'format' => 'filtered_html');
+  
+        // To maintain the same CID, use drupal_write_record() first, then save.
+        //drupal_write_record('comment', $comment);
+        comment_save($comment);
+    }
+
+    $context['message'] = t('Importing node @title', array('@title' => $node->title));
+    $context['sandbox']['current_node']++;
+    $context['sandbox']['progress']++;
+  }
+
+  db_set_active('default'); // Switch back.
+
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  }
+}
