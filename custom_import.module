@@ -263,7 +263,8 @@ function custom_import_batch_forum_posts(&$context) {
       'created' => $row->poster_time,
       'revision_timestamp' => $row->poster_time,
       'timestamp' => $row->poster_time,
-      #'changed' => $row->modified_time,
+      'timestamp' => $row->modified_time ? $row->modified_time :  $row->poster_time,
+      'changed' => $row->modified_time ? $row->modified_time :  $row->poster_time,
       'comment' => $row->locked ? 0 : 2,
 ### This is int, needs to be string i think
       'date' => $row->poster_time,
@@ -293,6 +294,20 @@ function custom_import_batch_forum_posts(&$context) {
     //drupal_write_record('node_revision', $node);
     node_save($node);
     
+    db_update('node')
+      ->fields(array(
+        'changed' => $row->modified_time ? $row->modified_time :  $row->poster_time,
+      ))
+      ->condition('nid', $node->nid)
+      ->execute();
+
+    db_update('node_revision')
+      ->fields(array(
+        'timestamp' => $row->modified_time ? $row->modified_time :  $row->poster_time,
+      ))
+      ->condition('nid', $node->nid)
+      ->execute();
+    
     db_set_active('smf');
     $query = db_select('messages', 'm');
     $query->innerJoin('members', 'me', 'm.id_member = me.id_member');
@@ -315,8 +330,8 @@ function custom_import_batch_forum_posts(&$context) {
             'subject' => truncate_utf8(custom_import_clean_body($comment_row->subject), 64, TRUE),
             'hostname' => $comment_row->poster_ip,
             'created' => $comment_row->poster_time,
-            'timestamp' => $comment_row->poster_time,
-            #'changed' => $comment_row->modified_time,
+            'timestamp' => $comment_row->modified_time ? $comment_row->modified_time :  $comment_row->poster_time,
+            'changed' => $comment_row->modified_time ? $comment_row->modified_time :  $comment_row->poster_time,
             'status' => $comment_row->approved,
             #'thread',
             'name' => $comment_row->poster_name,
